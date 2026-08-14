@@ -1,0 +1,30 @@
+ChaChaCha
+Copyright 2026 soda4fries
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+This product incorporates and adapts source code from the following
+third-party projects. Each incorporating file carries that project's own
+copyright and license header; nothing here overrides those headers or the
+terms they state. Full upstream license texts are also kept alongside the
+pinned source snapshots in vendor/ (see vendor/README.md for revisions).
+
+  * The OpenSSL Project (https://www.openssl.org/), Apache License 2.0.
+    Used in: x86_64-xlate.pl, chacha_kernels.pl (raw ChaCha20 kernels and
+    perlasm/translator, by Andy Polyakov), and as the base layout adapted in
+    aead_mac.S. Snapshot: vendor/openssl/.
+
+  * BoringSSL (https://boringssl.googlesource.com/boringssl/), Apache
+    License 2.0. AEAD scaffold adapted in aead512.pl, originally written by
+    Vlad Krasnov for Cloudflare. Snapshot: vendor/boringssl/.
+
+  * Cloudflare, Inc., ISC License. aead512.pl carries its own ISC copyright
+    and license header, retained as required by that license.
+
+  * Intel Corporation, BSD 3-Clause License. poly1305_ifma.asm is a
+    standalone extraction of Intel's AVX-512 IFMA Poly1305 finalizer and
+    retains Intel's own copyright and license header. Snapshot:
+    vendor/intel-ipsec-mb-kernels/.
+
+This NOTICE file is provided for informational purposes and does not modify
+any license.
