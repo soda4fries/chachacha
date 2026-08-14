@@ -20,10 +20,10 @@ Measured as core cycles from `perf_event_open`. Process pinned to one core, impl
 
 Complete ChaCha20-Poly1305, against Intel IPsec-MB and BoringSSL's stitched AVX2 implementation. Intel is shown at **its better of two entry points per size** — the job API and the documented single-buffer API each win at different lengths, taking the minimum for a fair comparison.
 
-| | Zen 5 | Zen 4 |
-|---|:---:|:---:|
-| **seal** | [![AEAD seal, Zen 5](results/figures/aead_seal_zen5.svg)](results/figures/aead_seal_zen5.svg) | [![AEAD seal, Zen 4](results/figures/aead_seal_zen4.svg)](results/figures/aead_seal_zen4.svg) |
-| **open** | [![AEAD open, Zen 5](results/figures/aead_open_zen5.svg)](results/figures/aead_open_zen5.svg) | [![AEAD open, Zen 4](results/figures/aead_open_zen4.svg)](results/figures/aead_open_zen4.svg) |
+| Machine | seal | open |
+|:---:|:---:|:---:|
+| **Zen 5** | [![AEAD seal, Zen 5](results/figures/aead_seal_zen5.svg)](results/figures/aead_seal_zen5.svg) | [![AEAD open, Zen 5](results/figures/aead_open_zen5.svg)](results/figures/aead_open_zen5.svg) |
+| **Zen 4** | [![AEAD seal, Zen 4](results/figures/aead_seal_zen4.svg)](results/figures/aead_seal_zen4.svg) | [![AEAD open, Zen 4](results/figures/aead_open_zen4.svg)](results/figures/aead_open_zen4.svg) |
 
 #### Speedup vs Intel IPsec-MB at Canonical Protocol Sizes:
 
@@ -38,9 +38,9 @@ Complete ChaCha20-Poly1305, against Intel IPsec-MB and BoringSSL's stitched AVX2
 | **16384**| Max TLS 1.3 Record | **+9.9% / +10.7%** | **+3.2% / +4.7%** |
 | **65536**| Bulk Transfer | **+7.5% / +8.5%** | **+4.3% / +3.8%** |
 
-**Interpretation:** 
-* **The Small Packet Dominance:** The AEAD delivers its largest wins (+15% to +38%) at standard network buffer sizes ($\le 2048\,\text{B}$) because `ChaCha20_33x_key` and `ChaCha20_25x_key` handle key derivation (Block 0) and payload encryption in a **single kernel dispatch**. Eliminating the ~400-cycle launch penalty of a separate key-generation pass matters far more at MTU sizes than raw loop throughput.
-* **Steady State & Tails:** On large records (4 KB–64 KB), the fused `16x_mac` pipeline with contiguous 2-chain $r^{32}$ range splitting sustains a 7–15% lead on Zen 5. The only regression is on Zen 4 for 9000 B Jumbo frames (−1.8%), where an 808-byte residue still pays for a separate tail launch.
+**Summary:**
+* **Small Packets ($\le 2\,\text{KB}$):** Strongest gains appear at canonical network sizes (WireGuard 1420 B, Ethernet 1500 B, 2 KB TLS)—delivering **+15% to +38% on Zen 5** and **+8% to +15% on Zen 4** over Intel IPsec-MB.
+* **Bulk Streams ($>4\,\text{KB}$):** Sustained **7–15% lead on Zen 5** and **3–5% on Zen 4** across large record sizes.
 
 ---
 
@@ -52,10 +52,9 @@ My dispatcher — 17x below 2240 bytes, 32x above — against OpenSSL's 16x and 
 |:---:|:---:|
 | [![AVX-512, Zen 5](results/figures/raw_avx512_zen5.svg)](results/figures/raw_avx512_zen5.svg) | [![AVX-512, Zen 4](results/figures/raw_avx512_zen4.svg)](results/figures/raw_avx512_zen4.svg) |
 
-**Interpretation:** 
-* **Zen 5 (The ILP-8 Win):** On Zen 5's wide execution engine, running dual interleaved 16-block states in `ChaCha20_32x` doubles ILP from 4 to 8. Enabled by register re-materialization, this produces a massive **25–33% throughput lead** over OpenSSL and Intel for streams 4 KB and larger.
-* **Zen 4 (Microarchitecture Differences):** Zen 4 gains only 5–8% from `32x` because its core double-pumps 512-bit vector operations across 256-bit physical pipes, leaving far less spare vector execution bandwidth for a second state to exploit.
-* **Below 2 KB (Raw Dispatch Tradeoff):** Under 2 KB, Intel IPsec-MB leads (4–8% on Zen 5, 16–26% on Zen 4) because a full 2048-byte dual pass cannot pay for itself on raw streams, falling back to 17x. However, this raw stream limitation does not affect the AEAD, where small packets are routed through the dedicated single-dispatch key-mode kernels instead.
+**Summary:**
+* **Zen 5:** Produces a **25–33% throughput lead** over OpenSSL and Intel IPsec-MB for data streams 4 KB and larger.
+* **Zen 4:** Yields a **5–8% lead** over OpenSSL on bulk data.
 
 ---
 
@@ -67,15 +66,14 @@ My 9x schedule against OpenSSL, BoringSSL, and Intel IPsec-MB. All four produce 
 |:---:|:---:|
 | [![AVX2, Zen 5](results/figures/raw_avx2_zen5.svg)](results/figures/raw_avx2_zen5.svg) | [![AVX2, Zen 4](results/figures/raw_avx2_zen4.svg)](results/figures/raw_avx2_zen4.svg) |
 
-**Interpretation:** 
-* **The Gains (Bulk Throughput):** Capturing otherwise idle integer ALUs with the 9th scalar block delivers a sustained **10% speedup on Zen 5** and **7–8% on Zen 4** for messages above a few kilobytes, approaching the theoretical $9/8$ (+12.5%) ceiling.
-* **The Dispatch Routing in Action:** At packet sizes ($\le 1\,\text{KB}$), the dispatcher's bit-shift checks prevent 9x from running when it wouldn't save a full pass, avoiding awkward leftover residues that would force slow scalar tails. As a result, it falls back cleanly to the 8x vector baseline, matching OpenSSL and BoringSSL step for step.
+**Summary:**
+* Delivers a sustained **10% speedup on Zen 5** and **7–8% on Zen 4** over OpenSSL and BoringSSL for messages above a few kilobytes.
 
 ---
 
 ## How It Works: The Story Behind Each Kernel
 
-Rather than separating abstract ideas from code, this section walks through how the project was designed, the exact hardware and cryptographic bottlenecks faced, why each assembly kernel was created, and how they operate together.
+This section walks through the hardware and cryptographic bottlenecks faced, why each assembly kernel was built, and how they operate together.
 
 ```
        RAW CIPHER                      FUSED STEADY-STATE                    PACKET OPTIMIZATION
@@ -139,10 +137,10 @@ We can "self-stitch" the algorithm by computing one extra ChaCha block purely in
 
 The scalar quarter-round instructions (adds, XORs, and rotates) are interleaved directly between vector instructions. Because they execute on separate physical execution ports, the CPU issues them during vector pipeline stalls at virtually zero added cycle cost. This gives theoretical throughput boosts of $+12.5\%$ ($9/8$) for AVX2 and $+6.25\%$ ($17/16$) for AVX-512.
 
-#### Why Not 10x or 18x? (The Register Limit)
-A single scalar ChaCha state requires 16 32-bit words. In 64-bit mode, you can pack two 32-bit words per 64-bit register, but you still need around 10–12 registers for state plus scratch registers for quarter rounds. Adding a second scalar block would require ~28 GPRs. But x86-64 only has 16 general-purpose registers, and the ABI calling convention leaves only ~14 usable. Spilling that state onto the stack creates memory traffic that destroys any performance gain. Thus, 9x and 17x are the physical limits for register-resident scalar stitching.
+#### Why Not 10x or 18x?
+A scalar ChaCha state takes 16 32-bit words. Packed into 64-bit registers, it needs 10–12 registers for state and scratch arithmetic. Adding a second scalar block would require ~28 GPRs, but x86-64 only has 16 (and only ~14 usable after ABI overhead). Spilling to stack memory destroys performance, making 9x and 17x the hard physical limit for register-resident scalar stitching.
 
-#### Exact Pass-Count Routing (Avoiding Slow Scalar Tails):
+#### Avoiding Slow Scalar Tails:
 A 9x iteration produces 576 bytes, while a standard 8x iteration produces 512 bytes. 
 * If a message is 550 bytes, running 9x handles it in **one pass** (576 B capacity), whereas 8x would need a full pass (512 B) *plus* a second tail pass for the leftover 38 bytes. Here, 9x is a clear win.
 * But if a message is 600 bytes, running 9x processes 576 bytes and leaves a 24-byte residue. Meanwhile, sticking to the standard 8x path processes 512 bytes, leaving 88 bytes that can cleanly step through the fast vector tail ladder ($4\text{x} \to 2\text{x} \to 1\text{x}$ vector blocks). The hybrid path leaves an awkward residue that forces the engine onto slow scalar tail cleanup instead of fast vector tails.
@@ -158,15 +156,15 @@ If the hybrid doesn't save a complete pass, it bypasses `9x`/`17x` entirely and 
 
 ### 2. Breaking the CPU Dependency Limit: `ChaCha20_32x`
 
-#### The Problem:
+#### The Bottleneck:
 ChaCha's internal math consists of 4 quarter rounds operating on matrix columns and diagonals. This means there are only 4 independent dependency chains that can execute in parallel—an Instruction-Level Parallelism (ILP) of 4. On wide execution cores like AMD Zen 5 (which can decode and dispatch up to 8 instructions per cycle), ILP 4 is not enough work to keep all vector pipelines fed. The core frequently stalls waiting for quarter-round results.
 
-#### The Solution (`ChaCha20_32x`):
+#### The Interleaved Dual State:
 `ChaCha20_32x` runs **two independent 16-block vector states** (`State A` and `State B`, totaling 32 blocks = **$2048\,\text{bytes}$ per pass**) interleaved in the exact same loop. 
 
 Because State A and State B are mathematically independent, their quarter-round instructions have no dependencies between each other. This doubles the ILP from 4 to 8, fully saturating Zen 5's execution pipes and producing a massive **25–33% speedup** on bulk data.
 
-#### The Register Re-materialization Trick:
+#### Saving Registers with Re-materialization:
 Running 32 parallel vector blocks requires all 32 AVX-512 registers (`zmm0` through `zmm31`) just to hold the active states during the quarter rounds. 
 
 However, at the end of the 20 rounds, ChaCha requires you to add the original initial matrix state back to the mixed state:
@@ -200,12 +198,10 @@ accumulator = ((accumulator + block_i) * r) % (2^130 - 5);
 
 Because they operate on completely different data structures and use completely separate CPU hardware execution units (SIMD vector pipes for ChaCha vs integer ALU ports for Poly1305), they can execute concurrently inside the same CPU core without interfering with each other's dependency chains.
 
-#### The Idea (Why Fuse Them?):
-In real-world AEAD protocols, ChaCha20 and Poly1305 almost always run together. When I looked at BoringSSL, I saw they already did this for AVX2 by cross-stitching ChaCha and Poly1305 into a single loop to do both jobs simultaneously, but they didn't have an AVX-512 version. I also saw their reasoning in [Cloudflare's blog post on the dangers of Intel frequency scaling](https://blog.cloudflare.com/on-the-dangers-of-intels-frequency-scaling/) about why they avoided AVX-512 (CPU core frequency throttling). Still, we can take that fused approach and bring it to AVX-512 to test its single-core performance limits.
+#### Why Fuse Them?
+In real-world AEAD, ChaCha20 and Poly1305 almost always run together. BoringSSL cross-stitched them in AVX2, but avoided AVX-512 due to CPU frequency scaling concerns (see [Cloudflare's writeup](https://blog.cloudflare.com/on-the-dangers-of-intels-frequency-scaling/)). I ported this fused model to AVX-512, expecting my faster vector cipher to speed up the loop—but benchmarks showed **zero speedup**.
 
-My initial assumption was that plugging in my faster AVX-512 ChaCha cipher would immediately make the fused AEAD loop faster. But when I benchmarked it, I was surprised to see **zero speedup**.
-
-#### The Discovery (The Poly1305 Shadow):
+#### The Poly1305 Bottleneck:
 When I measured each standalone component per 1024 bytes on Zen 5, the reason became clear:
 * Standalone Scalar Poly1305 MAC: **530 cycles**
 * Standalone AVX-512 ChaCha20 Cipher: **324 cycles**
@@ -215,12 +211,12 @@ With AVX-512 vector width, ChaCha is so fast that it finishes in 324 cycles and 
 
 *Why not just vectorize Poly1305 (e.g. using AVX-512 IFMA)?* Because vector Poly1305 and vector ChaCha would compete for the exact same SIMD vector execution ports, creating port contention. I measured that running IFMA's vector operations on top of the cipher's vector operations took 663 cycles at the vector-op ceiling—which was actually slower than the scalar path. The way we can achieve concurrency here is keeping ChaCha on vector ports and Poly1305 on scalar integer ports.
 
-#### The Solution (`ChaCha20_16x_mac*`):
+#### The Fused Loop (`ChaCha20_16x_mac*`):
 The steady-state loop processes 1024 bytes per iteration: 16 ZMM registers encrypt 1024 bytes of keystream while scalar integer ALUs authenticate the *previous* 1024 bytes of ciphertext.
 
 Because this loop was built from BoringSSL's AEAD scaffold, it originally inherited BoringSSL's AVX2 3-instruction sequence (`vpsrld`, `vpslld`, `vpor`) for rotates. Moving to AVX-512 allowed using OpenSSL's native single-instruction `vprold`, cutting rotate instructions by $3\times$ and immediately relieving vector-port pressure on the critical dependency chain.
 
-#### Range Splitting vs. Alternating Blocks:
+#### Why Range Splitting Instead of Alternating Blocks?
 One scalar Poly1305 chain cannot keep up with 1024 bytes of keystream, so the design uses two parallel Poly1305 chains.
 * *Why not alternate blocks (even blocks in Chain 1, odd blocks in Chain 2)?* In Poly1305, each step multiplies by $r$. If you alternate blocks, each chain must multiply by $r^2$. But $r$ is specially clamped with clear bits ($r \land \text{0x0ffffffc0ffffffc...}$) to allow fast modular reduction without carry propagation. $r^2$ is not clamped, making every single modular multiply much slower and destroying any benefit.
 * *The Contiguous Range Split:* Instead, the kernel splits each 1024-byte chunk into **two contiguous 512-byte halves**. Both chains multiply by the cheap, clamped $r$. At the end of the pass, they are combined only once using:
@@ -228,7 +224,7 @@ One scalar Poly1305 chain cannot keep up with 1024 bytes of keystream, so the de
 H = (A * r^32 + B) mod (2^130 - 5)
 ```
 
-#### Staggered Issue Scheduling (adapted from Intel IPsec Multi-Buffer):
+#### Staggering Instructions to Fill ALU Gaps:
 Each ChaCha quarter-round executes a sequence of 4 dependent steps ($a += b$, $d \oplus= a$, $d \lll= 16$, etc.) where each instruction must wait for the previous result.
 
 If all 4 parallel quarter-round chains are executed in lockstep (all 4 chains computing Step 1 simultaneously, then Step 2, etc.), they all hit the exact same dependency stall at the same time. The CPU's out-of-order execution window gets flooded with instructions that are all blocked waiting on the same latency stage.
@@ -237,7 +233,7 @@ Intel's IPsec Multi-Buffer library (`intel-ipsec-mb`) solves this by **staggerin
 
 ---
 
-### 4. Conquering Small-Packet Latency: `ChaCha20_33x_key` & `ChaCha20_25x_key`
+### 4. Small Packets: Single-Dispatch Key Mode (`33x_key` & `25x_key`)
 
 #### The Problem:
 In real-world networks (WireGuard VPN, QUIC, TLS 1.3), most packets are $\le 2048\,\text{bytes}$ (e.g. 1280 B IPv6 MTU, 1420 B WireGuard, 1500 B Ethernet). 
@@ -252,7 +248,7 @@ Standard crypto libraries launch **two separate assembly dispatches**:
 
 Every kernel dispatch pays roughly **~400 cycles of startup latency** (stack frame setup, register saving, and initial round dependency pipeline fill). On a 1280-byte packet, that extra launch wastes up to 30–40% of the entire execution time.
 
-#### The Solution (Single-Dispatch Key-Mode):
+#### The Single-Dispatch Solution:
 The key-mode kernels evaluate counter 0 and counters 1..N in a **single function launch**:
 * **Scalar GPRs:** Compute Block 0 (counter 0) to extract the Poly1305 key.
 * **AVX-512 ZMMs:** Simultaneously compute payload blocks (counters 1..N).
@@ -268,16 +264,16 @@ When the kernel returns, the ciphertext is encrypted and the Poly1305 key is alr
 
 ### 5. Tail Residues & Bridges: `poly1305_ifma.asm` & `poly1305_pow.S`
 
-#### Pipeline Asymmetry (Seal vs. Open):
+#### Seal vs. Open Pipelines:
 * **Open (Decryption + Auth):** The ciphertext already exists in memory from the start. Poly1305 can immediately start authenticating the data while ChaCha decrypts it.
 * **Seal (Encryption + Auth):** Poly1305 cannot authenticate a block until ChaCha finishes encrypting it into ciphertext. This requires an initial "fill" phase (encrypt block 1 before auth starts) and a "drain" phase at the end.
 
-#### Residue Finalization:
+#### Handling Leftover Residues:
 When a message doesn't divide evenly into 1024-byte steady-state chunks, how does the pipeline finish the leftover bytes (the residue)?
 * **Small Residues ($\le 768\,\text{bytes}$):** Setting up vector IFMA constants takes more time than it saves. Small leftovers are finished using the fast scalar Poly1305 path.
 * **Large Residues ($> 768\,\text{bytes}$):** `poly1305_ifma.asm` kicks in, using AVX-512 IFMA52 ($52\times 52 \to 104$-bit integer multiply-accumulate) to process the large tail at maximum vector speed.
 
-#### The Accumulator Bridge (`poly1305_pow.S`):
+#### Joining Split Accumulators (`poly1305_pow.S`):
 When a suffix is authenticated independently with IFMA, its result cannot simply be added to the running scalar accumulator. For an $m$-block suffix, the math requires an accumulator bridge:
 ```text
 H_total = (A * r^m + B) mod (2^130 - 5)
@@ -297,8 +293,6 @@ A few takeaways from building and measuring this:
 From what I measured, there are still physical execution resources left on the table. In the fused loop, the AVX-512 cipher finishes in 324 cycles while scalar Poly1305 takes 530 cycles, leaving the vector units sitting idle for ~200 cycles waiting for the MAC. At the same time, cores like Zen 5 have 6 integer ALU ports, but the 2 scalar Poly1305 chains only keep 2 to 3 ports busy at a time. I tried several ideas to capture those remaining resources, but hit practical limits. The CPU runs out of usable registers (~14 GPR limit) for extra scalar chains, and vectorizing Poly1305 with IFMA creates SIMD port contention with ChaCha. Adding more polynomial splits introduces combining power ladders ($A \cdot r^k + B$) that cost more instructions than they save. I also tried Karatsuba multiplication (`poly1305_pow_karatsuba.S`), but the limb-unpacking, middle-term adds, and carry reduction overhead wiped out the multiply savings. Even ADX (`adcx`/`adox`) parallel carry chains turned out to be architecture-dependent—it helped on Zen 4, but regressed on Zen 5 because Zen 5's integer ALUs handle standard addition flags faster.
 
 This whole work would probably also be interesting on architectures with more registers, like ARM. But I haven't looked into how they implement ChaCha/Poly1305 and I don't have an ARM machine to test on.
-
-All measurement logs, raw benchmarks, and failed design ideas are kept in `FINDINGS.md`.
 
 ---
 
